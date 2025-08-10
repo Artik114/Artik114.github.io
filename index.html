@@ -1,207 +1,369 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html lang="uk">
 <head>
-<meta charset="UTF-8">
-<title>VR Sculpt with Teleport</title>
-<style>body { margin:0; background:#000; }</style>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>VR Sculpt Demo (Inflate + Smooth + OBJ Export)</title>
+<style>
+  body { margin:0; overflow:hidden; font-family: sans-serif; }
+  #info { position: absolute; left: 10px; top: 10px; color: #fff; z-index:5; background: rgba(0,0,0,0.3); padding:8px; border-radius:6px; }
+  button { margin-left:6px; }
+</style>
 </head>
 <body>
+<div id="info">
+  VR Sculpt Demo — Inflate / Smooth · A = switch tool · stick up/down = brush size · Trigger = apply<br/>
+  <button id="downloadBtn">Export OBJ</button>
+  <span id="status" style="margin-left:10px"></span>
+</div>
+
 <script type="module">
 import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.157/build/three.module.js';
 import { VRButton } from 'https://cdn.jsdelivr.net/npm/three@0.157/examples/jsm/webxr/VRButton.js';
-import { XRControllerModelFactory } from 'https://cdn.jsdelivr.net/npm/three@0.157/examples/jsm/webxr/XRControllerModelFactory.js';
-import { OBJExporter } from 'https://cdn.jsdelivr.net/npm/three@0.157/examples/jsm/exporters/OBJExporter.js';
 
-// === SCENE ===
 let scene = new THREE.Scene();
-let camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 100);
-let renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(window.innerWidth, window.innerHeight);
+scene.background = new THREE.Color(0x20232a);
+
+const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.01, 100);
+camera.position.set(0, 1.6, 1.5);
+
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth, innerHeight);
 renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local');
 document.body.appendChild(renderer.domElement);
 document.body.appendChild(VRButton.createButton(renderer));
 
-// === LIGHT ===
-scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.0));
-let dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-dirLight.position.set(1,1,1);
-scene.add(dirLight);
+const light = new THREE.HemisphereLight(0xffffee, 0x444466, 1.2);
+scene.add(light);
+const dir = new THREE.DirectionalLight(0xffffff, 0.6);
+dir.position.set(1,2,1);
+scene.add(dir);
 
-// === FLOOR ===
-let floorGeo = new THREE.PlaneGeometry(10, 10);
-let floorMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
-let floor = new THREE.Mesh(floorGeo, floorMat);
-floor.rotation.x = -Math.PI/2;
-floor.receiveShadow = true;
-scene.add(floor);
-
-// === MESH TO SCULPT ===
-let geom = new THREE.SphereGeometry(0.3, 64, 64);
-let mat = new THREE.MeshStandardMaterial({ color: 0xdddddd });
-let mesh = new THREE.Mesh(geom, mat);
-mesh.position.set(0, 1.2, -1);
-scene.add(mesh);
-
-// === BRUSH CURSOR ===
-let brushSize = 0.05;
-let brushMesh = new THREE.Mesh(
-    new THREE.SphereGeometry(brushSize, 16, 16),
-    new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.3 })
+// Ground
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(10,10),
+  new THREE.MeshStandardMaterial({color:0x101214, roughness:1})
 );
+ground.rotation.x = -Math.PI/2;
+ground.position.y = 0;
+scene.add(ground);
+
+// Sculpt mesh (sphere)
+const geom = new THREE.SphereGeometry(0.3, 64, 64);
+geom.computeVertexNormals();
+const mat = new THREE.MeshStandardMaterial({color:0xdadada, metalness:0.05, roughness:0.6});
+const sculptMesh = new THREE.Mesh(geom, mat);
+sculptMesh.position.set(0,1.2,-0.2);
+scene.add(sculptMesh);
+
+// Helper: make sure the geometry has non-indexed position for easy editing
+if (geom.index) geom.toNonIndexed();
+
+// Controllers
+const controllerR = renderer.xr.getController(0);
+scene.add(controllerR);
+const controllerL = renderer.xr.getController(1);
+scene.add(controllerL);
+
+// Visual brush cursor sphere
+const brushMat = new THREE.MeshStandardMaterial({color:0x00ffcc, transparent:true, opacity:0.25, depthTest:false});
+const brushGeom = new THREE.SphereGeometry(1, 16, 12);
+const brushMesh = new THREE.Mesh(brushGeom, brushMat);
 scene.add(brushMesh);
 
-// === CONTROLLERS ===
-let controller1 = renderer.xr.getController(0);
-let controller2 = renderer.xr.getController(1);
-scene.add(controller1);
-scene.add(controller2);
+// Wrist HUD (simple plane with text using CanvasTexture)
+const hudCanvas = document.createElement('canvas');
+hudCanvas.width = 512; hudCanvas.height = 256;
+const hudCtx = hudCanvas.getContext('2d');
+function drawHUD(text, size) {
+  hudCtx.clearRect(0,0,hudCanvas.width,hudCanvas.height);
+  hudCtx.fillStyle = 'rgba(30,30,30,0.75)';
+  hudCtx.fillRect(0,0,hudCanvas.width,hudCanvas.height);
+  hudCtx.fillStyle = '#fff';
+  hudCtx.font = '40px sans-serif';
+  hudCtx.fillText('Tool: ' + text, 20, 80);
+  hudCtx.fillText('Radius: ' + size.toFixed(3), 20, 150);
+}
+drawHUD('Inflate', 0.05);
+const hudTex = new THREE.CanvasTexture(hudCanvas);
+const hudMat = new THREE.MeshBasicMaterial({map: hudTex, side: THREE.DoubleSide, transparent:true});
+const hudPlane = new THREE.Mesh(new THREE.PlaneGeometry(0.25, 0.125), hudMat);
+hudPlane.renderOrder = 999;
+scene.add(hudPlane);
 
-let controllerModelFactory = new XRControllerModelFactory();
-let grip1 = renderer.xr.getControllerGrip(0);
-grip1.add(controllerModelFactory.createControllerModel(grip1));
-scene.add(grip1);
-let grip2 = renderer.xr.getControllerGrip(1);
-grip2.add(controllerModelFactory.createControllerModel(grip2));
-scene.add(grip2);
+// State
+let tool = 'Inflate'; // or 'Smooth'
+let brushRadius = 0.05;
+let strength = 0.02;
+const positionAttr = geom.attributes.position;
+const normalAttr = geom.attributes.normal;
+const vertexCount = positionAttr.count;
 
-// === HUD on Wrist ===
-let hudCanvas = document.createElement('canvas');
-hudCanvas.width = 256; hudCanvas.height = 64;
-let hudCtx = hudCanvas.getContext('2d');
-let hudTex = new THREE.CanvasTexture(hudCanvas);
-let hudMat = new THREE.MeshBasicMaterial({ map: hudTex, side: THREE.DoubleSide });
-let hudMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.1, 0.025), hudMat);
-hudMesh.position.set(0, 0.05, 0);
-hudMesh.rotation.x = -Math.PI/2;
-grip1.add(hudMesh);
+// Utility: world position of vertex
+const vWorld = new THREE.Vector3();
+const tmpV = new THREE.Vector3();
+const tmpN = new THREE.Vector3();
 
-function updateHUD() {
-    hudCtx.fillStyle = 'black';
-    hudCtx.fillRect(0, 0, hudCanvas.width, hudCanvas.height);
-    hudCtx.fillStyle = 'white';
-    hudCtx.font = '40px sans-serif';
-    hudCtx.fillText(`Tool: ${tool}`, 10, 50);
-    hudTex.needsUpdate = true;
+// For debouncing A button
+let lastSwitchTime = 0;
+
+// For simple smoothing: get neighbor indices via spatial hashing (approx)
+const vertexPositions = []; // stores Vector3 in local space (cached)
+for (let i = 0; i < vertexCount; i++) {
+  const v = new THREE.Vector3().fromBufferAttribute(positionAttr, i);
+  vertexPositions.push(v);
 }
 
-// === TOOL SETTINGS ===
-let tool = "Inflate"; // Inflate or Smooth
-updateHUD();
+// Build adjacency (vertex neighbors) from faces (we have non-indexed triangles)
+const neighbors = new Array(vertexCount);
+for (let i = 0; i < vertexCount; i++) neighbors[i] = new Set();
+if (geom.index === null) {
+  // non-indexed, triangles in sequence
+  for (let i = 0; i < vertexCount; i += 3) {
+    const a = i, b = i+1, c = i+2;
+    neighbors[a].add(b); neighbors[a].add(c);
+    neighbors[b].add(a); neighbors[b].add(c);
+    neighbors[c].add(a); neighbors[c].add(b);
+  }
+} else {
+  const idx = geom.index.array;
+  for (let i = 0; i < idx.length; i += 3) {
+    const a = idx[i], b = idx[i+1], c = idx[i+2];
+    neighbors[a].add(b); neighbors[a].add(c);
+    neighbors[b].add(a); neighbors[b].add(c);
+    neighbors[c].add(a); neighbors[c].add(b);
+  }
+}
 
-// === SCULPT LOGIC ===
-let brushStrength = 0.005;
+// Simple spatial hash for nearby vertex queries
+const grid = new Map();
+const cellSize = brushRadius * 1.5;
+function buildHash() {
+  grid.clear();
+  for (let i = 0; i < vertexCount; i++) {
+    const p = vertexPositions[i];
+    const key = `${Math.floor(p.x / cellSize)}_${Math.floor(p.y / cellSize)}_${Math.floor(p.z / cellSize)}`;
+    if (!grid.has(key)) grid.set(key, []);
+    grid.get(key).push(i);
+  }
+}
+buildHash();
 
-function inflate(positionAttr, pos) {
-    for (let i = 0; i < positionAttr.count; i++) {
-        let v = new THREE.Vector3().fromBufferAttribute(positionAttr, i);
-        mesh.localToWorld(v);
-        let dist = v.distanceTo(pos);
-        if (dist < brushSize) {
-            let dir = v.clone().sub(pos).normalize();
-            v.add(dir.multiplyScalar(brushStrength * (1 - dist / brushSize)));
-            mesh.worldToLocal(v);
-            positionAttr.setXYZ(i, v.x, v.y, v.z);
+function queryRadiusLocal(centerLocal, radius) {
+  const r2 = radius * radius;
+  const cx = Math.floor(centerLocal.x / cellSize);
+  const cy = Math.floor(centerLocal.y / cellSize);
+  const cz = Math.floor(centerLocal.z / cellSize);
+  const found = new Set();
+  for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++) {
+    const key = `${cx+dx}_${cy+dy}_${cz+dz}`;
+    const bucket = grid.get(key);
+    if (!bucket) continue;
+    for (const idx of bucket) {
+      const p = vertexPositions[idx];
+      if (p.distanceToSquared(centerLocal) <= r2) found.add(idx);
+    }
+  }
+  return Array.from(found);
+}
+
+// Controller visual: small sphere on right controller
+const controllerSphere = new THREE.Mesh(new THREE.SphereGeometry(0.01,8,8), new THREE.MeshBasicMaterial({color:0xffaa00}));
+controllerR.add(controllerSphere);
+
+// Handle input & interactions
+renderer.setAnimationLoop( animate );
+let tempMatrix = new THREE.Matrix4();
+
+function animate() {
+  // update brush position to right controller
+  controllerR.matrixWorld.decompose(tmpV, new THREE.Quaternion(), new THREE.Vector3());
+  // tmpV is world pos of controller
+  brushMesh.position.copy(tmpV);
+  brushMesh.scale.setScalar(brushRadius);
+
+  // position HUD on left controller's wrist
+  controllerL.matrixWorld.decompose(tmpV, new THREE.Quaternion(), new THREE.Vector3());
+  // place HUD slightly offset from controller (wrist)
+  hudPlane.position.copy(tmpV).add(new THREE.Vector3(0.06, -0.02, 0.04)); 
+  hudPlane.quaternion.copy(controllerL.quaternion);
+  // rotate plane to face player a bit
+  hudPlane.rotateY(Math.PI); // face outward
+
+  // Update HUD texture
+  drawHUD(tool, brushRadius);
+  hudTex.needsUpdate = true;
+
+  // Read gamepad for right controller (if available) for size adjust & A button
+  const session = renderer.xr.getSession();
+  if (session) {
+    const inputSources = session.inputSources;
+    for (const src of inputSources) {
+      if (!src.gamepad) continue;
+      // try to find which is right by handedness
+      const handed = src.handedness || 'none';
+      const gp = src.gamepad;
+      // axes: typical mapping [stickX, stickY, ...], but varies; we attempt common positions:
+      // We'll read vertical axis from gp.axes[3] or gp.axes[1] or gp.axes[2]
+      let yAxis = 0;
+      if (gp.axes.length >= 4) yAxis = gp.axes[3];
+      else if (gp.axes.length >= 2) yAxis = gp.axes[1];
+      else if (gp.axes.length >= 3) yAxis = gp.axes[2] || 0;
+      // Only apply size changes when the source is right (or if only one controller)
+      const isRight = (handed === 'right') || (handed === 'none' && src === inputSources[0]);
+      if (isRight) {
+        // adjust size with up/down stick motion
+        if (Math.abs(yAxis) > 0.25) {
+          // invert axis: up usually = -1
+          const delta = -yAxis * 0.0018;
+          brushRadius = Math.max(0.01, Math.min(0.2, brushRadius + delta));
+          // Rebuild spatial hash with new cell size if necessary
+          // (we keep cellSize constant for simplicity)
         }
-    }
-}
-
-function smooth(positionAttr, pos) {
-    for (let i = 0; i < positionAttr.count; i++) {
-        let v = new THREE.Vector3().fromBufferAttribute(positionAttr, i);
-        mesh.localToWorld(v);
-        let dist = v.distanceTo(pos);
-        if (dist < brushSize) {
-            let avg = new THREE.Vector3();
-            let count = 0;
-            for (let j = 0; j < positionAttr.count; j++) {
-                let vn = new THREE.Vector3().fromBufferAttribute(positionAttr, j);
-                mesh.localToWorld(vn);
-                if (vn.distanceTo(v) < brushSize * 0.5) {
-                    avg.add(vn);
-                    count++;
-                }
-            }
-            if (count > 0) {
-                avg.divideScalar(count);
-                mesh.worldToLocal(avg);
-                positionAttr.setXYZ(i, avg.x, avg.y, avg.z);
-            }
+        // buttons: try to detect A button press to switch tool
+        // Common mapping: buttons[3] is 'A' on Oculus. We'll check a few common indices.
+        const now = performance.now();
+        const aPressed = (gp.buttons[3] && gp.buttons[3].pressed) || (gp.buttons[4] && gp.buttons[4].pressed) || false;
+        if (aPressed && now - lastSwitchTime > 300) {
+          toggleTool();
+          lastSwitchTime = now;
+          // small haptic pulse if available
+          if (gp.hapticActuators && gp.hapticActuators.length) {
+            try { gp.hapticActuators[0].pulse(0.2, 50); } catch(e) {}
+          }
         }
+      }
+      // Trigger application (select) handled via selectstart/selectend events below
     }
+  }
+
+  renderer.render(scene, camera);
 }
 
-// === EXPORT OBJ ===
-function exportOBJ() {
-    let exporter = new OBJExporter();
-    let result = exporter.parse(mesh);
-    let blob = new Blob([result], { type: 'text/plain' });
-    let link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = 'sculpt.obj';
-    link.click();
+// Select (trigger) events for sculpt apply
+let isApplying = false;
+controllerR.addEventListener('selectstart', () => { isApplying = true; });
+controllerR.addEventListener('selectend', () => { isApplying = false; });
+
+function applySculpt(worldPos) {
+  // compute local space of sculptMesh
+  const localCenter = sculptMesh.worldToLocal(worldPos.clone());
+  // query vertices in radius via spatial hash
+  const affected = queryRadiusLocal(localCenter, brushRadius);
+  if (affected.length === 0) return;
+  if (tool === 'Inflate') {
+    // Inflate: displace along normal away from center
+    for (const i of affected) {
+      const v = vertexPositions[i]; // local
+      const n = new THREE.Vector3().fromBufferAttribute(normalAttr, i).normalize();
+      // compute world normal correctly: transform normal by mesh matrix (approx here)
+      // sample direction from center to vertex for inflation feel
+      const dir = v.clone().sub(localCenter).normalize();
+      const dist = v.distanceTo(localCenter);
+      const t = 1 - (dist / brushRadius);
+      const disp = dir.multiplyScalar(strength * t);
+      v.add(disp);
+      positionAttr.setXYZ(i, v.x, v.y, v.z);
+    }
+  } else if (tool === 'Smooth') {
+    // Simple Laplacian smoothing: average neighbors
+    const newPositions = {};
+    for (const i of affected) {
+      let sum = new THREE.Vector3();
+      let cnt = 0;
+      for (const ni of neighbors[i]) {
+        sum.add(vertexPositions[ni]);
+        cnt++;
+      }
+      if (cnt > 0) {
+        const avg = sum.multiplyScalar(1/cnt);
+        // relax vertex towards average (amount scaled by strength and falloff)
+        const v = vertexPositions[i];
+        const dist = v.distanceTo(localCenter);
+        const t = 1 - (dist / brushRadius);
+        const relax = avg.sub(v).multiplyScalar(0.5 * strength * t * 5.0); // scale factor to make visible
+        const newV = v.clone().add(relax);
+        newPositions[i] = newV;
+      }
+    }
+    // apply new positions
+    for (const iStr in newPositions) {
+      const i = parseInt(iStr);
+      const nv = newPositions[i];
+      vertexPositions[i].copy(nv);
+      positionAttr.setXYZ(i, nv.x, nv.y, nv.z);
+    }
+  }
+  positionAttr.needsUpdate = true;
+  geom.computeVertexNormals();
 }
 
-// === TELEPORT ===
-let raycaster = new THREE.Raycaster();
-let teleportMarker = new THREE.Mesh(
-    new THREE.CircleGeometry(0.15, 32),
-    new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.5 })
-);
-teleportMarker.rotation.x = -Math.PI/2;
-teleportMarker.visible = false;
-scene.add(teleportMarker);
+// create a loop to apply sculpt while trigger held
+setInterval(() => {
+  if (isApplying) {
+    // world position of controllerR
+    const worldPos = new THREE.Vector3();
+    controllerR.getWorldPosition(worldPos);
+    applySculpt(worldPos);
+  }
+}, 40); // 25Hz apply rate (balance between responsiveness and CPU)
 
-controller1.addEventListener('selectstart', () => { teleportMarker.visible = true; });
-controller1.addEventListener('selectend', () => {
-    if (teleportMarker.visible) {
-        camera.position.copy(teleportMarker.position);
-    }
-    teleportMarker.visible = false;
+// toggle tool
+function toggleTool() {
+  tool = (tool === 'Inflate') ? 'Smooth' : 'Inflate';
+  // small color feedback on brush
+  brushMesh.material.color.set(tool === 'Inflate' ? 0x00ff88 : 0x0099ff);
+}
+
+// OBJ Export
+function exportOBJ(mesh) {
+  const objParts = [];
+  const pos = mesh.geometry.attributes.position;
+  const norm = mesh.geometry.attributes.normal;
+  const vcount = pos.count;
+  for (let i = 0; i < vcount; i++) {
+    const p = new THREE.Vector3().fromBufferAttribute(pos, i);
+    const wp = mesh.localToWorld(p.clone());
+    objParts.push(`v ${wp.x} ${wp.y} ${wp.z}`);
+  }
+  for (let i = 0; i < vcount; i++) {
+    const n = new THREE.Vector3().fromBufferAttribute(norm, i);
+    objParts.push(`vn ${n.x} ${n.y} ${n.z}`);
+  }
+  // faces: non-indexed triangles sequential
+  for (let i = 0; i < vcount; i += 3) {
+    // OBJ is 1-based
+    const a = i+1, b = i+2, c = i+3;
+    objParts.push(`f ${a}//${a} ${b}//${b} ${c}//${c}`);
+  }
+  return objParts.join('\n');
+}
+
+// Download button
+const downBtn = document.getElementById('downloadBtn');
+const statusSpan = document.getElementById('status');
+downBtn.addEventListener('click', () => {
+  statusSpan.textContent = 'Preparing OBJ...';
+  setTimeout(() => {
+    const obj = exportOBJ(sculptMesh);
+    const blob = new Blob([obj], {type:'text/plain'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'sculpt.obj';
+    a.click();
+    URL.revokeObjectURL(url);
+    statusSpan.textContent = 'Downloaded sculpt.obj';
+    setTimeout(()=>statusSpan.textContent = '', 2500);
+  }, 50);
 });
 
-// === LOOP ===
-renderer.setAnimationLoop(() => {
-    let session = renderer.xr.getSession();
-    if (session) {
-        let pos = new THREE.Vector3().setFromMatrixPosition(controller2.matrixWorld);
-        brushMesh.position.copy(pos);
-        brushMesh.scale.setScalar(brushSize / 0.05);
-
-        let gamepads = navigator.getGamepads();
-        if (gamepads[1]) {
-            let gp = gamepads[1];
-            if (gp.buttons[0].pressed) {
-                let positionAttr = geom.attributes.position;
-                if (tool === "Inflate") inflate(positionAttr, pos);
-                else smooth(positionAttr, pos);
-                positionAttr.needsUpdate = true;
-                geom.computeVertexNormals();
-            }
-            if (gp.buttons[1].pressed) exportOBJ();
-            if (gp.buttons[4].pressed) { tool = (tool === "Inflate" ? "Smooth" : "Inflate"); updateHUD(); }
-            if (Math.abs(gp.axes[3]) > 0.2) {
-                brushSize += gp.axes[3] * 0.001;
-                brushSize = Math.max(0.01, Math.min(0.2, brushSize));
-            }
-        }
-
-        // TELEPORT
-        if (gamepads[0] && gamepads[0].buttons[0].pressed) {
-            let tempMatrix = new THREE.Matrix4();
-            tempMatrix.identity().extractRotation(controller1.matrixWorld);
-            raycaster.ray.origin.setFromMatrixPosition(controller1.matrixWorld);
-            raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
-            let intersects = raycaster.intersectObject(floor);
-            if (intersects.length > 0) {
-                teleportMarker.position.copy(intersects[0].point);
-                teleportMarker.visible = true;
-            } else {
-                teleportMarker.visible = false;
-            }
-        }
-    }
-
-    renderer.render(scene, camera);
+// Resize
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
 });
 </script>
 </body>
