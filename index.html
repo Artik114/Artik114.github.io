@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>VR Sculpt with Teleport</title>
+<style>body { margin:0; background:#000; }</style>
+</head>
+<body>
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.157/build/three.module.js';
+import { VRButton } from 'https://cdn.jsdelivr.net/npm/three@0.157/examples/jsm/webxr/VRButton.js';
+import { XRControllerModelFactory } from 'https://cdn.jsdelivr.net/npm/three@0.157/examples/jsm/webxr/XRControllerModelFactory.js';
+import { OBJExporter } from 'https://cdn.jsdelivr.net/npm/three@0.157/examples/jsm/exporters/OBJExporter.js';
+
+// === SCENE ===
+let scene = new THREE.Scene();
+let camera = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHeight, 0.01, 100);
+let renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+document.body.appendChild(VRButton.createButton(renderer));
+
+// === LIGHT ===
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.0));
+let dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(1,1,1);
+scene.add(dirLight);
+
+// === FLOOR ===
+let floorGeo = new THREE.PlaneGeometry(10, 10);
+let floorMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+let floor = new THREE.Mesh(floorGeo, floorMat);
+floor.rotation.x = -Math.PI/2;
+floor.receiveShadow = true;
+scene.add(floor);
+
+// === MESH TO SCULPT ===
+let geom = new THREE.SphereGeometry(0.3, 64, 64);
+let mat = new THREE.MeshStandardMaterial({ color: 0xdddddd });
+let mesh = new THREE.Mesh(geom, mat);
+mesh.position.set(0, 1.2, -1);
+scene.add(mesh);
+
+// === BRUSH CURSOR ===
+let brushSize = 0.05;
+let brushMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(brushSize, 16, 16),
+    new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.3 })
+);
+scene.add(brushMesh);
+
+// === CONTROLLERS ===
+let controller1 = renderer.xr.getController(0);
+let controller2 = renderer.xr.getController(1);
+scene.add(controller1);
+scene.add(controller2);
+
+let controllerModelFactory = new XRControllerModelFactory();
+let grip1 = renderer.xr.getControllerGrip(0);
+grip1.add(controllerModelFactory.createControllerModel(grip1));
+scene.add(grip1);
+let grip2 = renderer.xr.getControllerGrip(1);
+grip2.add(controllerModelFactory.createControllerModel(grip2));
+scene.add(grip2);
+
+// === HUD on Wrist ===
+let hudCanvas = document.createElement('canvas');
+hudCanvas.width = 256; hudCanvas.height = 64;
+let hudCtx = hudCanvas.getContext('2d');
+let hudTex = new THREE.CanvasTexture(hudCanvas);
+let hudMat = new THREE.MeshBasicMaterial({ map: hudTex, side: THREE.DoubleSide });
+let hudMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.1, 0.025), hudMat);
+hudMesh.position.set(0, 0.05, 0);
+hudMesh.rotation.x = -Math.PI/2;
+grip1.add(hudMesh);
+
+function updateHUD() {
+    hudCtx.fillStyle = 'black';
+    hudCtx.fillRect(0, 0, hudCanvas.width, hudCanvas.height);
+    hudCtx.fillStyle = 'white';
+    hudCtx.font = '40px sans-serif';
+    hudCtx.fillText(`Tool: ${tool}`, 10, 50);
+    hudTex.needsUpdate = true;
+}
+
+// === TOOL SETTINGS ===
+let tool = "Inflate"; // Inflate or Smooth
+updateHUD();
+
+// === SCULPT LOGIC ===
+let brushStrength = 0.005;
+
+function inflate(positionAttr, pos) {
+    for (let i = 0; i < positionAttr.count; i++) {
+        let v = new THREE.Vector3().fromBufferAttribute(positionAttr, i);
+        mesh.localToWorld(v);
+        let dist = v.distanceTo(pos);
+        if (dist < brushSize) {
+            let dir = v.clone().sub(pos).normalize();
+            v.add(dir.multiplyScalar(brushStrength * (1 - dist / brushSize)));
+            mesh.worldToLocal(v);
+            positionAttr.setXYZ(i, v.x, v.y, v.z);
+        }
+    }
+}
+
+function smooth(positionAttr, pos) {
+    for (let i = 0; i < positionAttr.count; i++) {
+        let v = new THREE.Vector3().fromBufferAttribute(positionAttr, i);
+        mesh.localToWorld(v);
+        let dist = v.distanceTo(pos);
+        if (dist < brushSize) {
+            let avg = new THREE.Vector3();
+            let count = 0;
+            for (let j = 0; j < positionAttr.count; j++) {
+                let vn = new THREE.Vector3().fromBufferAttribute(positionAttr, j);
+                mesh.localToWorld(vn);
+                if (vn.distanceTo(v) < brushSize * 0.5) {
+                    avg.add(vn);
+                    count++;
+                }
+            }
+            if (count > 0) {
+                avg.divideScalar(count);
+                mesh.worldToLocal(avg);
+                positionAttr.setXYZ(i, avg.x, avg.y, avg.z);
+            }
+        }
+    }
+}
+
+// === EXPORT OBJ ===
+function exportOBJ() {
+    let exporter = new OBJExporter();
+    let result = exporter.parse(mesh);
+    let blob = new Blob([result], { type: 'text/plain' });
+    let link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'sculpt.obj';
+    link.click();
+}
+
+// === TELEPORT ===
+let raycaster = new THREE.Raycaster();
+let teleportMarker = new THREE.Mesh(
+    new THREE.CircleGeometry(0.15, 32),
+    new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.5 })
+);
+teleportMarker.rotation.x = -Math.PI/2;
+teleportMarker.visible = false;
+scene.add(teleportMarker);
+
+controller1.addEventListener('selectstart', () => { teleportMarker.visible = true; });
+controller1.addEventListener('selectend', () => {
+    if (teleportMarker.visible) {
+        camera.position.copy(teleportMarker.position);
+    }
+    teleportMarker.visible = false;
+});
+
+// === LOOP ===
+renderer.setAnimationLoop(() => {
+    let session = renderer.xr.getSession();
+    if (session) {
+        let pos = new THREE.Vector3().setFromMatrixPosition(controller2.matrixWorld);
+        brushMesh.position.copy(pos);
+        brushMesh.scale.setScalar(brushSize / 0.05);
+
+        let gamepads = navigator.getGamepads();
+        if (gamepads[1]) {
+            let gp = gamepads[1];
+            if (gp.buttons[0].pressed) {
+                let positionAttr = geom.attributes.position;
+                if (tool === "Inflate") inflate(positionAttr, pos);
+                else smooth(positionAttr, pos);
+                positionAttr.needsUpdate = true;
+                geom.computeVertexNormals();
+            }
+            if (gp.buttons[1].pressed) exportOBJ();
+            if (gp.buttons[4].pressed) { tool = (tool === "Inflate" ? "Smooth" : "Inflate"); updateHUD(); }
+            if (Math.abs(gp.axes[3]) > 0.2) {
+                brushSize += gp.axes[3] * 0.001;
+                brushSize = Math.max(0.01, Math.min(0.2, brushSize));
+            }
+        }
+
+        // TELEPORT
+        if (gamepads[0] && gamepads[0].buttons[0].pressed) {
+            let tempMatrix = new THREE.Matrix4();
+            tempMatrix.identity().extractRotation(controller1.matrixWorld);
+            raycaster.ray.origin.setFromMatrixPosition(controller1.matrixWorld);
+            raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+            let intersects = raycaster.intersectObject(floor);
+            if (intersects.length > 0) {
+                teleportMarker.position.copy(intersects[0].point);
+                teleportMarker.visible = true;
+            } else {
+                teleportMarker.visible = false;
+            }
+        }
+    }
+
+    renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
